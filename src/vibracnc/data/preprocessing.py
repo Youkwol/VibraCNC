@@ -84,7 +84,7 @@ def dataframe_to_windows(
     amplitudes : np.ndarray
     """
     sorted_frame = ensure_sorted_by_timestamp(frame)
-    signal = sorted_frame[sensor_columns].to_numpy(dtype=float)
+    signal = sorted_frame[list(sensor_columns)].to_numpy(dtype=float)
     windows = list(sliding_windows(signal, config.window_size, config.stride))
     return batch_fft(windows, config.sampling_rate)
 

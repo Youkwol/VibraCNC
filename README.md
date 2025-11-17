@@ -45,12 +45,15 @@ data/phm2010/
 python -m vibracnc.cli train-anomaly \
   --dataset-dir data/phm2010 \
   --models-dir artifacts/models \
-  --per-condition-limit 40
+  --per-condition-limit 40 \
+  --device cuda
 ```
 
 산출물:
 - `artifacts/models/anomaly_autoencoder.pt`
 - `artifacts/models/anomaly_artifacts.json`
+
+> Use `--device` to choose `auto`/`cpu`/`cuda` (default `auto`). CUDA GPUs are used automatically when available.
 
 ## 🔮 RUL 예측 학습
 

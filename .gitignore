@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+.venv*/
+venv/
+ENV/
+env/
+
+# Data files
+data/phm2010/
+data/phm2010.zip
+data/*.csv
+data/*.zip
+
+# Model artifacts
+artifacts/models/*.pt
+artifacts/models/*.pkl
+artifacts/models/*.json
+artifacts/figures/*.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

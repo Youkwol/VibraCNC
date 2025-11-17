@@ -28,14 +28,15 @@ def download_dataset(dataset_config: DatasetConfig) -> Path:
 def collect_normal_frames(dataset_root: Path, dataset_config: DatasetConfig, per_condition_limit: int = 30) -> list[pd.DataFrame]:
     frames: list[pd.DataFrame] = []
     for condition in dataset_config.normal_conditions:
-        frames.extend(
-            load_condition(
-                dataset_root,
-                condition,
-                column_names=dataset_config.resolve_column_names(),
-                limit=per_condition_limit,
-            )
+        print(f"[train-anomaly] loading condition '{condition}' (limit={per_condition_limit})", flush=True)
+        condition_frames = load_condition(
+            dataset_root,
+            condition,
+            column_names=dataset_config.resolve_column_names(),
+            limit=per_condition_limit,
         )
+        print(f"[train-anomaly] loaded condition '{condition}' -> {len(condition_frames)} frames", flush=True)
+        frames.extend(condition_frames)
     return frames
 
 
@@ -72,7 +73,7 @@ def train_anomaly_detection(
     save_model(model, model_path)
 
     metadata = {
-        "threshold": artifacts.threshold,
+        "threshold": float(artifacts.threshold),
         "frequencies": artifacts.frequencies.tolist(),
         "train_history": artifacts.train_history,
         "config": asdict(artifacts.config),

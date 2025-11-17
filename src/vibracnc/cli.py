@@ -3,9 +3,19 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import torch
+
 from vibracnc.anomaly.autoencoder import AutoencoderConfig
 from vibracnc.config import DatasetConfig, ProjectPaths
 from vibracnc.workflows import download_dataset, train_anomaly_detection, train_rul_model
+
+
+def resolve_device(device_arg: str) -> str:
+    if device_arg == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if device_arg == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available. Choose --device cpu or install CUDA-enabled PyTorch.")
+    return device_arg
 
 
 def train_anomaly_command(args: argparse.Namespace) -> None:
@@ -28,6 +38,9 @@ def train_anomaly_command(args: argparse.Namespace) -> None:
     if args.download:
         download_dataset(dataset_config)
 
+    device = resolve_device(args.device)
+    print(f"[train-anomaly] device={device}")
+
     autoencoder_config = AutoencoderConfig(
         input_dim=len(dataset_config.fft_columns),
         seq_len=args.seq_len,
@@ -38,6 +51,7 @@ def train_anomaly_command(args: argparse.Namespace) -> None:
         lr=args.learning_rate,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        device=device,
     )
 
     train_anomaly_detection(
@@ -90,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     anomaly_parser.add_argument("--epochs", type=int, default=50)
     anomaly_parser.add_argument("--batch-size", type=int, default=64)
     anomaly_parser.add_argument("--per-condition-limit", type=int, default=30)
+    anomaly_parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto", help="Device to run training on.")
     anomaly_parser.set_defaults(func=train_anomaly_command)
 
     rul_parser = subparsers.add_parser("train-rul", help="RUL 회귀 모델 학습")

@@ -89,6 +89,7 @@ def train_autoencoder(
         epoch_loss /= len(train_loader.dataset)
         history["train_loss"].append(epoch_loss)
 
+        val_loss_value = float("nan")
         if val_loader is not None:
             model.eval()
             val_loss = 0.0
@@ -99,9 +100,16 @@ def train_autoencoder(
                     loss = criterion(recon, batch)
                     val_loss += loss.item() * batch.size(0)
             val_loss /= len(val_loader.dataset)
+            val_loss_value = val_loss
             history["val_loss"].append(val_loss)
         else:
             history["val_loss"].append(float("nan"))
+
+        progress = (epoch + 1) / config.epochs * 100
+        log_message = f"[train] epoch {epoch + 1}/{config.epochs} ({progress:5.1f}%) - train_loss={epoch_loss:.6f}"
+        if not np.isnan(val_loss_value):
+            log_message += f", val_loss={val_loss_value:.6f}"
+        print(log_message, flush=True)
 
     return history
 
