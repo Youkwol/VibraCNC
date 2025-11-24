@@ -35,13 +35,19 @@ def load_anomaly_artifacts(metadata_path: Path) -> AnomalyDetectionArtifacts:
     config = AutoencoderConfig(**data["config"])
     frequencies = np.array(data["frequencies"], dtype=float)
     threshold = float(data["threshold"])
+    frame_threshold = float(data.get("frame_threshold", threshold))  # 하위 호환성
     history = data.get("train_history", {})
+    norm_min = np.array(data["norm_min"], dtype=float) if "norm_min" in data and data["norm_min"] is not None else None
+    norm_max = np.array(data["norm_max"], dtype=float) if "norm_max" in data and data["norm_max"] is not None else None
     return AnomalyDetectionArtifacts(
         frequencies=frequencies,
         train_history=history,
         threshold=threshold,
+        frame_threshold=frame_threshold,
         errors=np.array([]),
         config=config,
+        norm_min=norm_min,
+        norm_max=norm_max,
     )
 
 
@@ -56,18 +62,46 @@ def load_anomaly_resources(models_dir: Path) -> tuple[LSTMAutoencoder, AnomalyDe
     return model, artifacts
 
 
-def collect_normal_frames(dataset_root: Path, dataset_config: DatasetConfig, per_condition_limit: int = 30) -> list[pd.DataFrame]:
+def collect_normal_frames(
+    dataset_root: Path, 
+    dataset_config: DatasetConfig, 
+    per_condition_limit: int | None = None,
+    max_wear: float | None = None,
+) -> list[pd.DataFrame]:
+    """
+    정상 상태 데이터를 수집합니다. 초기 cut만 사용합니다.
+    
+    Args:
+        per_condition_limit: 각 조건당 사용할 데이터 개수. 기본값: 20 (초기 20개 cut만 사용).
+        max_wear: 정상으로 간주할 최대 마모량 (μm). None이면 wear.csv를 사용하지 않음.
+    """
     frames: list[pd.DataFrame] = []
+    
     for condition in dataset_config.normal_conditions:
-        print(f"[train-anomaly] loading condition '{condition}' (limit={per_condition_limit})", flush=True)
-        condition_frames = load_condition(
-            dataset_root,
-            condition,
-            column_names=dataset_config.resolve_column_names(),
-            limit=per_condition_limit,
-        )
+        condition_dir = dataset_root / condition
+        if not condition_dir.exists():
+            continue
+            
+        csv_files = sorted(condition_dir.glob("*.csv"))
+        
+        # per_condition_limit 적용 (초기 cut만 사용)
+        if per_condition_limit is not None:
+            csv_files = csv_files[:per_condition_limit]
+            limit_str = str(per_condition_limit)
+        else:
+            limit_str = "all"
+        
+        print(f"[train-anomaly] loading condition '{condition}' (first {limit_str} cuts)", flush=True)
+        
+        # 프레임 로드
+        condition_frames = [
+            load_csv(path, column_names=dataset_config.resolve_column_names()) 
+            for path in csv_files
+        ]
+        
         print(f"[train-anomaly] loaded condition '{condition}' -> {len(condition_frames)} frames", flush=True)
         frames.extend(condition_frames)
+    
     return frames
 
 
@@ -76,14 +110,20 @@ def train_anomaly_detection(
     dataset_config: DatasetConfig,
     project_paths: ProjectPaths,
     autoencoder_config: Optional[AutoencoderConfig] = None,
-    per_condition_limit: int = 30,
+    per_condition_limit: int | None = None,
+    max_wear: float | None = None,
 ) -> tuple[LSTMAutoencoder, AnomalyDetectionArtifacts]:
     window_config = WindowingConfig.from_seconds(
         window_seconds=dataset_config.window_seconds,
         step_seconds=dataset_config.step_seconds,
         sampling_rate=dataset_config.sampling_rate,
     )
-    normal_frames = collect_normal_frames(dataset_root, dataset_config, per_condition_limit=per_condition_limit)
+    normal_frames = collect_normal_frames(
+        dataset_root, 
+        dataset_config, 
+        per_condition_limit=per_condition_limit,
+        max_wear=max_wear,
+    )
 
     if autoencoder_config is None:
         autoencoder_config = AutoencoderConfig(
@@ -105,9 +145,12 @@ def train_anomaly_detection(
 
     metadata = {
         "threshold": float(artifacts.threshold),
+        "frame_threshold": float(artifacts.frame_threshold),
         "frequencies": artifacts.frequencies.tolist(),
         "train_history": artifacts.train_history,
         "config": asdict(artifacts.config),
+        "norm_min": artifacts.norm_min.tolist() if artifacts.norm_min is not None else None,
+        "norm_max": artifacts.norm_max.tolist() if artifacts.norm_max is not None else None,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2))
     return model, artifacts
@@ -301,5 +344,7 @@ def train_rul_model(
     metrics_path = project_paths.figures_dir / "rul_metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
 
-    return evaluation_df, feature_importance.reset_index(names=["feature", "importance"])
+    feature_importance_df = feature_importance.reset_index()
+    feature_importance_df.columns = ["feature", "importance"]
+    return evaluation_df, feature_importance_df
 

@@ -38,8 +38,10 @@ def prepare_dataset(
     features_df = pd.DataFrame(feature_records).fillna(0.0)
     y = np.asarray(target, dtype=float)
     groups_arr = np.asarray(groups) if groups is not None else None
-    if "group_id" in features_df.columns and groups_arr is None:
-        groups_arr = features_df.pop("group_id").to_numpy()
+    if "group_id" in features_df.columns:
+        group_values = features_df.pop("group_id").to_numpy()
+        if groups_arr is None:
+            groups_arr = group_values
     return features_df, y, groups_arr
 
 

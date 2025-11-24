@@ -25,7 +25,14 @@ data/*.zip
 artifacts/models/*.pt
 artifacts/models/*.pkl
 artifacts/models/*.json
+artifacts/models/*.csv
 artifacts/figures/*.csv
+artifacts/monitoring/*.json
+artifacts/figures/anomaly/*.csv
+
+# Temporary analysis scripts
+check_*.py
+analyze_*.py
 
 # IDE
 .vscode/
