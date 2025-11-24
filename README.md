@@ -55,6 +55,36 @@ python -m vibracnc.cli train-anomaly \
 
 > Use `--device` to choose `auto`/`cpu`/`cuda` (default `auto`). CUDA GPUs are used automatically when available.
 
+## 🔍 이상 탐지 추론
+
+```bash
+python -m vibracnc.cli infer-anomaly \
+  --dataset-dir data/phm2010 \
+  --models-dir artifacts/models \
+  --conditions c2 c3 \
+  --per-condition-limit 60 \
+  --output-dir artifacts/figures/anomaly
+  --device cpu
+```
+
+- 각 조건별 재구성 오차/이상 판정을 계산한 CSV가 `output-dir`(`artifacts/figures/anomaly` 기본값)에 저장됩니다.
+- 콘솔에는 윈도우 수와 이상 비율이 요약되어 출력됩니다. `--conditions`를 생략하면 `DatasetConfig.normal_conditions`가 사용됩니다.
+- GPU 가중치로 학습한 모델을 CPU에서 추론하려면 `--device cpu`를 명시해 주세요(`auto` 기본값은 GPU가 있을 때 CUDA를 사용).
+
+## 🧾 규칙 기반 이상 탐지
+
+```bash
+python -m vibracnc.cli rule-anomaly \
+  --dataset-dir data/phm2010 \
+  --conditions c2 c3 \
+  --per-condition-limit 40 \
+  --output-dir artifacts/figures/rule_based
+```
+
+- `src/vibracnc/config.py`에 정의된 `RuleDefinition` 목록(예: 온도 65 °C 초과, 축별 RMS 초과 등)을 이용해 윈도우별 규칙 위반 여부를 계산합니다.
+- 조건별 결과는 `output-dir/<condition>_rule_based.csv`에 저장되며, CSV에는 규칙 이름·임계값·실측값·위반 여부가 모두 포함됩니다.
+- 규칙을 변경하고 싶다면 `config.py`의 `DEFAULT_RULES` 값을 수정하거나 새로운 `RuleDefinition`을 추가하세요.
+
 ## 🔮 RUL 예측 학습
 
 ```bash

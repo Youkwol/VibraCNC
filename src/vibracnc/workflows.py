@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import joblib
+import numpy as np
 import pandas as pd
 
-from vibracnc.anomaly.autoencoder import AutoencoderConfig, LSTMAutoencoder, save_model
+from vibracnc.anomaly.autoencoder import AutoencoderConfig, LSTMAutoencoder, load_model, save_model
 from vibracnc.anomaly.pipeline import AnomalyDetectionArtifacts, classify_anomalies, score_with_artifacts, train_normal_model
-from vibracnc.config import DatasetConfig, ProjectPaths
-from vibracnc.data.loader import load_condition, load_csv
+from vibracnc.anomaly.rules import evaluate_rules_on_frame
+from vibracnc.config import DatasetConfig, ProjectPaths, RuleDefinition
+from vibracnc.data.loader import discover_csv_files, load_condition, load_csv
 from vibracnc.data.preprocessing import WindowingConfig
 from vibracnc.data.targets import load_wear_file
 from vibracnc.rul.features import FeatureExtractionConfig, extract_features
@@ -23,6 +25,35 @@ def download_dataset(dataset_config: DatasetConfig) -> Path:
 
     dataset_root = download_phm2010_dataset(dataset_config.root_dir, force=False)
     return dataset_root
+
+
+def load_anomaly_artifacts(metadata_path: Path) -> AnomalyDetectionArtifacts:
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"{metadata_path} 파일을 찾을 수 없습니다. 먼저 학습을 수행하세요.")
+
+    data = json.loads(metadata_path.read_text())
+    config = AutoencoderConfig(**data["config"])
+    frequencies = np.array(data["frequencies"], dtype=float)
+    threshold = float(data["threshold"])
+    history = data.get("train_history", {})
+    return AnomalyDetectionArtifacts(
+        frequencies=frequencies,
+        train_history=history,
+        threshold=threshold,
+        errors=np.array([]),
+        config=config,
+    )
+
+
+def load_anomaly_resources(models_dir: Path) -> tuple[LSTMAutoencoder, AnomalyDetectionArtifacts]:
+    metadata_path = models_dir / "anomaly_artifacts.json"
+    model_path = models_dir / "anomaly_autoencoder.pt"
+    artifacts = load_anomaly_artifacts(metadata_path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"{model_path} 파일이 없습니다. 학습된 가중치를 먼저 생성하세요.")
+    model = load_model(model_path, artifacts.config)
+    model.eval()
+    return model, artifacts
 
 
 def collect_normal_frames(dataset_root: Path, dataset_config: DatasetConfig, per_condition_limit: int = 30) -> list[pd.DataFrame]:
@@ -104,6 +135,99 @@ def evaluate_anomaly_on_condition(
     errors = score_with_artifacts(model, frames, dataset_config.fft_columns, window_config, artifacts)
     labels = classify_anomalies(errors, artifacts.threshold)
     return pd.DataFrame({"error": errors, "anomaly": labels})
+
+
+def run_anomaly_inference(
+    model: LSTMAutoencoder,
+    artifacts: AnomalyDetectionArtifacts,
+    dataset_root: Path,
+    dataset_config: DatasetConfig,
+    condition: str,
+    per_condition_limit: Optional[int] = None,
+    output_path: Optional[Path] = None,
+) -> pd.DataFrame:
+    """
+    단일 조건에 대해 이상 탐지를 수행하고 옵션에 따라 CSV로 저장한다.
+    """
+    results = evaluate_anomaly_on_condition(
+        model,
+        artifacts,
+        dataset_root,
+        condition,
+        dataset_config,
+        per_condition_limit=per_condition_limit,
+    )
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        results.to_csv(output_path, index=False)
+    return results
+
+
+def run_rule_based_detection(
+    dataset_root: Path,
+    dataset_config: DatasetConfig,
+    condition: str,
+    rules: Optional[Sequence[RuleDefinition]] = None,
+    per_condition_limit: Optional[int] = None,
+    window_config: Optional[WindowingConfig] = None,
+    output_path: Optional[Path] = None,
+) -> pd.DataFrame:
+    if window_config is None:
+        window_config = WindowingConfig.from_seconds(
+            window_seconds=dataset_config.window_seconds,
+            step_seconds=dataset_config.step_seconds,
+            sampling_rate=dataset_config.sampling_rate,
+        )
+
+    active_rules: Sequence[RuleDefinition] = rules or dataset_config.rule_definitions
+    if not active_rules:
+        raise ValueError("적용할 규칙 정의가 없습니다.")
+
+    condition_dir = dataset_root / condition
+    csv_files = discover_csv_files(condition_dir)
+    if per_condition_limit is not None:
+        csv_files = csv_files[:per_condition_limit]
+
+    if not csv_files:
+        return pd.DataFrame()
+
+    records: list[pd.DataFrame] = []
+    window_offset = 0
+    column_names = dataset_config.resolve_column_names()
+
+    for path in csv_files:
+        frame = load_csv(path, column_names=column_names)
+        rule_df, num_windows = evaluate_rules_on_frame(
+            frame,
+            sensor_columns=dataset_config.sensor_columns,
+            rules=active_rules,
+            window_config=window_config,
+            timestamp_col=dataset_config.timestamp_column,
+            window_offset=window_offset,
+        )
+        if num_windows == 0:
+            continue
+        rule_df["condition"] = condition
+        rule_df["source_file"] = str(path.relative_to(dataset_root))
+        records.append(rule_df)
+        window_offset += num_windows
+
+    if not records:
+        return pd.DataFrame()
+
+    result = pd.concat(records, ignore_index=True)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.to_csv(output_path, index=False)
+    return result
+
+
+def summarize_rule_results(result: pd.DataFrame) -> tuple[int, int]:
+    if result.empty:
+        return 0, 0
+    total_windows = result["window_index"].nunique()
+    violated_windows = result.loc[result["violated"]]["window_index"].nunique()
+    return total_windows, violated_windows
 
 
 def train_rul_model(

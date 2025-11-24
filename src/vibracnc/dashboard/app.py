@@ -1,32 +1,14 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from vibracnc.anomaly.autoencoder import AutoencoderConfig, LSTMAutoencoder, load_model
-from vibracnc.anomaly.pipeline import AnomalyDetectionArtifacts
+from vibracnc.anomaly.autoencoder import load_model
 from vibracnc.config import DatasetConfig, ProjectPaths
-from vibracnc.workflows import evaluate_anomaly_on_condition
-
-
-def load_artifacts(metadata_path: Path) -> AnomalyDetectionArtifacts:
-    data = json.loads(metadata_path.read_text())
-    config = AutoencoderConfig(**data["config"])
-    frequencies = np.array(data["frequencies"], dtype=float)
-    threshold = float(data["threshold"])
-    history = data.get("train_history", {})
-    return AnomalyDetectionArtifacts(
-        frequencies=frequencies,
-        train_history=history,
-        threshold=threshold,
-        errors=np.array([]),
-        config=config,
-    )
+from vibracnc.workflows import evaluate_anomaly_on_condition, load_anomaly_artifacts
 
 
 def render_sidebar() -> tuple[Path, Path, DatasetConfig, ProjectPaths]:
@@ -61,7 +43,7 @@ def anomaly_page(dataset_root: Path, models_dir: Path, dataset_config: DatasetCo
         st.info("학습된 이상 탐지 모델이 없습니다. 먼저 학습 워크플로우를 실행하세요.")
         return
 
-    artifacts = load_artifacts(metadata_path)
+    artifacts = load_anomaly_artifacts(metadata_path)
     model = load_model(model_path, artifacts.config)
 
     condition = st.selectbox("조건 선택", dataset_config.normal_conditions + ("c2", "c3", "c5"))

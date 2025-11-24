@@ -27,6 +27,7 @@ class AutoencoderConfig:
 
 class LSTMAutoencoder(nn.Module):
     def __init__(self, config: AutoencoderConfig):
+        """LSTM 기반 시퀀스 오토인코더를 구성한다."""
         super().__init__()
         self.encoder = nn.LSTM(
             input_size=config.input_dim,
@@ -47,6 +48,14 @@ class LSTMAutoencoder(nn.Module):
         self.output = nn.Linear(config.hidden_dim, config.input_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        입력 시퀀스를 잠재 공간으로 압축한 뒤 다시 복원한다.
+
+        Parameters
+        ----------
+        x: torch.Tensor
+            shape = (batch, seq_len, feature_dim)
+        """
         encoded_seq, _ = self.encoder(x)
         latent = self.to_latent(encoded_seq[:, -1, :])
         repeated = latent.unsqueeze(1).repeat(1, x.size(1), 1)
@@ -56,6 +65,7 @@ class LSTMAutoencoder(nn.Module):
 
 
 def build_dataloader(features: np.ndarray, config: AutoencoderConfig, shuffle: bool = True) -> DataLoader:
+    """Numpy 배열을 받아 PyTorch DataLoader로 래핑한다."""
     tensor = torch.tensor(features, dtype=torch.float32)
     dataset = TensorDataset(tensor)
     return DataLoader(dataset, batch_size=config.batch_size, shuffle=shuffle)
@@ -67,6 +77,9 @@ def train_autoencoder(
     config: AutoencoderConfig,
     val_loader: Optional[DataLoader] = None,
 ) -> dict[str, list[float]]:
+    """
+    LSTM 오토인코더를 학습시키고 에폭별 손실 기록을 반환한다.
+    """
     device = torch.device(config.device)
     model.to(device)
     criterion = nn.MSELoss()
@@ -115,6 +128,13 @@ def train_autoencoder(
 
 
 def reconstruction_error(model: LSTMAutoencoder, features: np.ndarray, config: AutoencoderConfig) -> np.ndarray:
+    """
+    재구성 오차를 계산해 이상 점수로 활용한다.
+
+    Returns
+    -------
+    np.ndarray: 각 샘플별 평균 제곱 오차 값.
+    """
     device = torch.device(config.device)
     model.eval()
     loader = build_dataloader(features, config, shuffle=False)
