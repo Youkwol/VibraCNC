@@ -35,16 +35,25 @@ data/phm2010/
 **크기:** 약 수십 MB
 
 **필수 파일:**
-- ✅ `anomaly_autoencoder.pt` - 이상 탐지 LSTM AutoEncoder 모델 가중치
+- ✅ `best_anomaly_model.pth` - 이상 탐지 LSTM AutoEncoder 모델 가중치 (최신 버전)
+- ✅ `anomaly_autoencoder.pt` - 이상 탐지 LSTM AutoEncoder 모델 가중치 (구버전, 호환성)
 - ✅ `anomaly_artifacts.json` - 이상 탐지 모델 메타데이터 (임계값, 정규화 파라미터, 학습 히스토리)
+- ✅ `wear_regressor.pth` - 마모 예측 CNN-LSTM 모델 가중치 (새로 추가)
+- ✅ `wear_scaler_params.npy` - 마모 모델 정규화 파라미터 (새로 추가)
 - ✅ `rul_random_forest.pkl` - RUL 예측 Random Forest 모델
 - ✅ `rul_feature_importance.csv` - RUL 피처 중요도
 
 **생성 방법:**
 ```bash
-# 이상 탐지 모델 학습
+# 이상 탐지 모델 학습 (기존 CLI 방식)
 $env:PYTHONPATH = "$PWD\src"
 python -m vibracnc.cli train-anomaly --dataset-dir data/phm2010 --models-dir artifacts/models --per-condition-limit 10 --epochs 10 --device cuda
+
+# 또는 새로운 스크립트 방식 (generate_results.py 사용 시)
+# generate_results.py는 best_anomaly_model.pth를 사용합니다
+
+# 마모 예측 모델 학습 (새로 추가)
+python train_wear_model.py
 
 # RUL 예측 모델 학습
 python -m vibracnc.cli train-rul --dataset-dir data/phm2010 --models-dir artifacts/models --figures-dir artifacts/figures
@@ -52,7 +61,26 @@ python -m vibracnc.cli train-rul --dataset-dir data/phm2010 --models-dir artifac
 
 ## 📊 선택적 파일 (대시보드 사용 시 필요)
 
-### 3. 생성된 리포트 파일들
+### 3. 사전 계산된 결과 파일들 (`artifacts/results/`)
+
+**경로:** `artifacts/results/`  
+**크기:** 약 수백 MB
+
+**파일 목록 (cnc_viewer.py 사용 시 필요):**
+- `c1.npy`, `c2.npy`, `c3.npy`, `c4.npy`, `c5.npy`, `c6.npy` - 각 조건별 이상 점수
+- `c1_features.npy`, `c2_features.npy`, ... - 각 조건별 센서별 기여도 (feature-wise error)
+- `c1_wear.npy`, `c2_wear.npy`, ... - 각 조건별 마모 예측 결과
+
+**생성 방법:**
+```bash
+# 이상 점수 및 센서별 기여도 계산
+python generate_results.py
+
+# 마모 예측 결과 생성 (train_wear_model.py가 자동으로 생성)
+python train_wear_model.py
+```
+
+### 4. 생성된 리포트 파일들
 
 **경로:** `artifacts/monitoring/` 및 `artifacts/figures/`
 
@@ -137,10 +165,15 @@ streamlit run dashboard.py
 
 **최소 필수 파일:**
 1. `data/phm2010/` (전체 폴더)
-2. `artifacts/models/anomaly_autoencoder.pt`
+2. `artifacts/models/best_anomaly_model.pth` (또는 `anomaly_autoencoder.pt`)
 3. `artifacts/models/anomaly_artifacts.json`
-4. `artifacts/models/rul_random_forest.pkl`
-5. `artifacts/models/rul_feature_importance.csv`
+4. `artifacts/models/wear_regressor.pth` (마모 예측 사용 시)
+5. `artifacts/models/wear_scaler_params.npy` (마모 예측 사용 시)
+6. `artifacts/models/rul_random_forest.pkl` (RUL 예측 사용 시)
+7. `artifacts/models/rul_feature_importance.csv` (RUL 예측 사용 시)
+
+**cnc_viewer.py 사용 시 추가 필요:**
+- `artifacts/results/*.npy` (모든 조건의 이상 점수, feature-wise error, 마모 예측)
 
 **대시보드 사용 시 추가 필요:**
 - `artifacts/monitoring/*.json`

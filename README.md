@@ -150,9 +150,45 @@ python -m vibracnc.cli analysis-report \
 
 피처 중요도, 센서 상관관계, 정상/이상 통계 등을 분석합니다. `infer-anomaly`와 `train-rul`을 먼저 실행해야 합니다.
 
-## 📊 Streamlit 대시보드
+## 📊 대시보드 및 뷰어 애플리케이션
 
-### 실시간 모니터링 대시보드
+### Tkinter 데스크톱 앱 (권장)
+
+#### 1. 실시간 모니터링 뷰어 (`cnc_viewer.py`)
+
+```bash
+# 먼저 사전 계산된 결과 생성
+python generate_results.py
+python train_wear_model.py
+
+# 뷰어 실행
+python cnc_viewer.py
+```
+
+**기능:**
+- 🖥️ **실시간 모니터링**: 이상 점수 추이, KPI 지표, 센서별 기여도
+- 🔮 **예측 및 진단**: RUL 예측, 마모 예측 그래프, 교체 시기 추천
+- 🔍 **심층 분석**: 센서별 기여도 막대 그래프, 정상 기준 비교 테이블
+- 💰 **운영 최적화**: 비용 절감 계산, 교체 시기 최적화 제안
+
+**특징:**
+- GPU 없이도 빠른 실행 (사전 계산된 결과 사용)
+- 깜빡임 없는 부드러운 UI
+- 탭 기반 인터페이스로 기능 분리
+
+#### 2. 종합 분석 리포트 (`cnc_analytics.py`)
+
+```bash
+python cnc_analytics.py
+```
+
+**기능:**
+- 📊 **성능 및 수명 비교**: 모든 조건(c1~c6)의 수명, 최대 이상 점수 비교
+- 💵 **경제적 가치 (ROI)**: 조건별 절감 비용, 총 ROI 계산
+
+### Streamlit 웹 대시보드
+
+#### 실시간 모니터링 대시보드
 
 ```bash
 streamlit run dashboard.py
@@ -164,7 +200,7 @@ streamlit run dashboard.py
 - 심층 분석 뷰: 피처 중요도, 센서 상관관계, 정상/이상 통계 비교
 - 운영 및 활용 최적화 뷰: (구현 예정)
 
-### 정적 분석 대시보드
+#### 정적 분석 대시보드
 
 ```bash
 streamlit run analysis_dashboard.py
@@ -174,6 +210,30 @@ streamlit run analysis_dashboard.py
 - 이상 탐지 모델 상세 분석: 모델 구조, 학습 과정, 임계값 설정 방법 설명
 - RUL 예측 모델 상세 분석: 피처 중요도, 예측 정확도, 마모 진행 패턴 분석
 - 전체 데이터셋 통계: 조건별 마모 진행, 이상 탐지 비율, 예측 오차 분포
+
+## 🛠️ 유틸리티 스크립트
+
+### 결과 사전 계산 (`generate_results.py`)
+
+```bash
+python generate_results.py
+```
+
+**기능:**
+- 모든 조건(c1~c6)에 대해 이상 점수 및 센서별 기여도를 미리 계산
+- `artifacts/results/*.npy` 파일로 저장
+- `cnc_viewer.py` 실행 전 필수
+
+### 마모 예측 모델 학습 (`train_wear_model.py`)
+
+```bash
+python train_wear_model.py
+```
+
+**기능:**
+- CNN-LSTM 모델로 마모량 예측 모델 학습
+- 각 조건별 마모 예측 결과를 `artifacts/results/*_wear.npy`로 저장
+- `cnc_viewer.py`의 마모 예측 그래프에 사용
 
 ## 📚 프로젝트 구조
 
@@ -271,17 +331,27 @@ $env:PYTHONPATH = "$PWD\src"
      ```
 
 2. **학습된 모델 파일들** (`artifacts/models/`)
-   - `anomaly_autoencoder.pt`: 이상 탐지 모델 가중치
+   - `best_anomaly_model.pth`: 이상 탐지 모델 가중치 (최신 버전)
+   - `anomaly_autoencoder.pt`: 이상 탐지 모델 가중치 (구버전, 호환성)
    - `anomaly_artifacts.json`: 이상 탐지 모델 메타데이터 (임계값, 정규화 파라미터 포함)
+   - `wear_regressor.pth`: 마모 예측 CNN-LSTM 모델 가중치
+   - `wear_scaler_params.npy`: 마모 모델 정규화 파라미터
    - `rul_random_forest.pkl`: RUL 예측 모델
    - `rul_feature_importance.csv`: RUL 피처 중요도
 
-3. **생성된 리포트 파일들** (선택사항)
+3. **사전 계산된 결과 파일들** (`artifacts/results/`) - cnc_viewer.py 사용 시 필요
+   - `c1.npy`, `c2.npy`, ... `c6.npy`: 각 조건별 이상 점수
+   - `c1_features.npy`, `c2_features.npy`, ...: 각 조건별 센서별 기여도
+   - `c1_wear.npy`, `c2_wear.npy`, ...: 각 조건별 마모 예측 결과
+
+4. **생성된 리포트 파일들** (선택사항)
    - `artifacts/monitoring/monitoring_report.json`
    - `artifacts/monitoring/diagnostics_report.json`
    - `artifacts/monitoring/analysis_report.json`
    - `artifacts/figures/rul_predictions.csv`
    - `artifacts/figures/anomaly/*.csv`
+
+**자세한 내용은 `GOOGLE_DRIVE_UPLOAD.md` 파일을 참고하세요.**
 
 **다운로드 후 배치:**
 ```bash
