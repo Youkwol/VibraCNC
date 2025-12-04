@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -17,15 +18,21 @@ STRIDE = 10
 SEQ_LEN = 50
 DOWNSAMPLE_FACTOR = 10
 THRESHOLD_DEFAULT = 0.0674
-SENSOR_NAMES = ["Force X", "Force Y", "Force Z", "Vib X", "Vib Y", "Vib Z", "AE"]
+
+# 실제 데이터 샘플링 속도 (PHM 2010: 25600 Hz)
+SAMPLING_RATE_HZ = 25600.0
+# 실제 step 간격 계산: (STRIDE / (SAMPLING_RATE_HZ / DOWNSAMPLE_FACTOR)) * 1000 (밀리초)
+REAL_TIME_STEP_MS = (STRIDE / (SAMPLING_RATE_HZ / DOWNSAMPLE_FACTOR)) * 1000  # 약 3.906 밀리초
+# 실제 데이터 순서: [vx, vy, vz, sx, sy, sz, temp]
+SENSOR_NAMES = ["Vib X", "Vib Y", "Vib Z", "Force X", "Force Y", "Force Z", "Temp"]
 SENSOR_DESCRIPTIONS = {
-    "Force X": "X축 절삭력 (N)",
-    "Force Y": "Y축 절삭력 (N)",
-    "Force Z": "Z축 절삭력 (N)",
     "Vib X": "X축 진동 (g)",
     "Vib Y": "Y축 진동 (g)",
     "Vib Z": "Z축 진동 (g)",
-    "AE": "음향 방출 (V)",
+    "Force X": "X축 절삭력 (N)",
+    "Force Y": "Y축 절삭력 (N)",
+    "Force Z": "Z축 절삭력 (N)",
+    "Temp": "온도 (℃)",
 }
 
 
@@ -62,9 +69,10 @@ class CNCViewerApp:
         self.feature_errors: np.ndarray | None = None
         self.y_max_limit = 0.1
         self.failure_step = 0
+        self.cut_boundaries: list[int] = []  # 각 cut 파일의 시작 step 인덱스
 
         self.threshold = tk.DoubleVar(value=THRESHOLD_DEFAULT)
-        self.speed = 50
+        self.speed = int(REAL_TIME_STEP_MS)  # 실제 데이터 속도로 기본값 설정 (약 3.9ms)
         self.status_var = tk.StringVar(value="준비 완료")
 
         # 비용 변수 (Tab 4용)
@@ -95,9 +103,14 @@ class CNCViewerApp:
         ttk.Button(control_frame, text="⏹ 초기화", command=self.reset_sim).pack(side="left", padx=5)
 
         ttk.Label(control_frame, text=" |  재생 속도:").pack(side="left", padx=10)
-        self.scale_speed = ttk.Scale(control_frame, from_=100, to=10, command=self.update_speed)
-        self.scale_speed.set(50)
+        # 실제 데이터 속도(약 3.9ms)를 기준으로 스케일 범위 설정
+        # 0.5배속 ~ 10배속 범위: 3.9*2=7.8ms ~ 3.9/10=0.39ms
+        self.scale_speed = ttk.Scale(control_frame, from_=int(REAL_TIME_STEP_MS * 2), to=int(REAL_TIME_STEP_MS / 10), command=self.update_speed)
+        self.scale_speed.set(int(REAL_TIME_STEP_MS))  # 실제 속도로 기본값 설정
         self.scale_speed.pack(side="left", padx=5)
+        
+        # 실제 속도 버튼 추가
+        ttk.Button(control_frame, text="실제 속도", command=self.set_real_time_speed).pack(side="left", padx=5)
 
         # 2. 탭 구성 (핵심)
         self.notebook = ttk.Notebook(self.root)
@@ -277,6 +290,12 @@ class CNCViewerApp:
 
     def update_speed(self, val: str) -> None:
         self.speed = int(float(val))
+    
+    def set_real_time_speed(self) -> None:
+        """실제 데이터 샘플링 속도로 설정"""
+        self.speed = int(REAL_TIME_STEP_MS)
+        self.scale_speed.set(int(REAL_TIME_STEP_MS))
+        self.status_var.set(f"재생 속도: 실제 속도 ({REAL_TIME_STEP_MS:.2f}ms/step)")
 
     # [추가] 기준값 계산 함수
     def calc_baseline(self) -> None:
@@ -324,6 +343,20 @@ class CNCViewerApp:
         thresh = self.threshold.get()
         danger = np.where(self.error_scores > thresh)[0]
         self.failure_step = danger[0] if len(danger) > 0 else len(self.error_scores)
+
+        # [추가] cut 경계 정보 로드
+        boundaries_path = Path(RESULT_DIR) / f"{scenario}_cut_boundaries.json"
+        if boundaries_path.exists():
+            try:
+                with open(boundaries_path, "r") as f:
+                    data = json.load(f)
+                    self.cut_boundaries = data.get("cut_boundaries", [])
+            except Exception as e:
+                print(f"Warning: cut 경계 정보 로드 실패: {e}, 기본값 사용")
+                self.cut_boundaries = []
+        else:
+            # 경계 정보가 없으면 빈 리스트로 설정 (기존 방식으로 fallback)
+            self.cut_boundaries = []
 
         # [추가] 마모량 데이터 로드 - 강제 우상향 적용
         wear_path = Path(RESULT_DIR) / f"{scenario}_wear.npy"
@@ -425,8 +458,21 @@ class CNCViewerApp:
             rul_cuts = rul_cuts_backup
 
         # 1. Tab 1 업데이트 (모니터링)
-        approx_cut = int((idx * STRIDE * DOWNSAMPLE_FACTOR) / SEQ_LEN) + 1
-        self.lbl_cut.config(text=f"#{approx_cut}")
+        # 실제 cut 번호 계산 (경계 정보 사용)
+        if self.cut_boundaries and len(self.cut_boundaries) > 0:
+            # 경계 정보가 있으면 현재 step 인덱스가 어느 cut에 속하는지 찾기
+            # cut_boundaries[i]는 i+1번째 cut의 시작 step 인덱스
+            cut_num = len(self.cut_boundaries)  # 기본값: 마지막 cut
+            for i in range(len(self.cut_boundaries) - 1, -1, -1):  # 역순으로 검색
+                if idx >= self.cut_boundaries[i]:
+                    cut_num = i + 1
+                    break
+        else:
+            # 경계 정보가 없으면 기존 방식 사용 (하위 호환성)
+            approx_cut = int((idx * STRIDE * DOWNSAMPLE_FACTOR) / SEQ_LEN) + 1
+            cut_num = approx_cut
+        
+        self.lbl_cut.config(text=f"#{cut_num}")
         self.lbl_score.config(text=f"{score:.4f}")
 
         is_danger = score > thresh

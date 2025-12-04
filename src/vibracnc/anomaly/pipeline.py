@@ -110,10 +110,11 @@ def train_normal_model(
     history = train_autoencoder(model, train_loader, autoencoder_config, val_loader)
 
     train_errors = reconstruction_error(model, features[train_idx], autoencoder_config)
-    # 윈도우 단위 임계값: 평균 + 1*표준편차 사용
+    # 윈도우 단위 임계값: 평균 + 4*표준편차 사용 (약 99.99% 정상 데이터 포함)
+    # 또는 95% 백분위수 사용 가능: threshold = np.percentile(train_errors, 95)
     mean_error = np.mean(train_errors)
     std_error = np.std(train_errors)
-    threshold = mean_error + 1 * std_error
+    threshold = mean_error + 4 * std_error
     
     # 프레임 단위 평균 오차 임계값 계산
     # 각 프레임에 대해 평균 오차를 계산
@@ -130,11 +131,12 @@ def train_normal_model(
         )
         frame_errors.append(float(np.mean(frame_window_errors)))
     
-    # 프레임 단위 임계값: 평균 + 1*표준편차 사용
+    # 프레임 단위 임계값: 평균 + 4*표준편차 사용 (약 99.99% 정상 데이터 포함)
+    # 또는 95% 백분위수 사용 가능: frame_threshold = np.percentile(frame_errors, 95)
     if frame_errors:
         mean_frame_error = np.mean(frame_errors)
         std_frame_error = np.std(frame_errors)
-        frame_threshold = mean_frame_error + 1 * std_frame_error
+        frame_threshold = mean_frame_error + 4 * std_frame_error
     else:
         frame_threshold = threshold
 

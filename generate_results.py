@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Iterable
@@ -145,16 +146,37 @@ def main() -> None:
         print(f"[{idx+1}/4] {condition} 처리 중...", end=" ", flush=True)
         cond_dir = dataset_root / condition
         frames = list(iter_condition_frames(cond_dir, args.downsample_factor))
+        
+        # 각 cut 파일의 경계 정보 계산 (각 cut 파일이 몇 개의 step을 생성하는지)
+        cut_boundaries = []  # 각 cut 파일의 시작 step 인덱스
+        current_step = 0
+        
+        for frame in frames:
+            # 각 cut 파일의 다운샘플링된 길이
+            downsampled_len = len(frame)
+            # 이 cut 파일에서 생성되는 시퀀스 수
+            num_sequences = (downsampled_len - args.seq_len) // args.stride + 1
+            if num_sequences > 0:
+                cut_boundaries.append(current_step)
+                current_step += num_sequences
+        
         full_df = pd.concat(frames, ignore_index=True)
         normalized = (full_df.values - global_min) / global_range
         sequences = build_sequences(normalized, args.seq_len, args.stride)
         total_errors, feature_errors = score_sequences(model, device, sequences, args.batch_size)
         score_path = output_dir / f"{condition}.npy"
         feature_path = output_dir / f"{condition}_features.npy"
+        boundaries_path = output_dir / f"{condition}_cut_boundaries.json"
+        
         np.save(score_path, total_errors.astype(np.float32))
         np.save(feature_path, feature_errors.astype(np.float32))
+        
+        # cut 경계 정보 저장
+        with open(boundaries_path, "w") as f:
+            json.dump({"cut_boundaries": cut_boundaries, "total_cuts": len(cut_boundaries)}, f)
+        
         print(
-            f"저장 완료 (steps={len(total_errors)}, score={score_path}, features={feature_path}, shape={feature_errors.shape})"
+            f"저장 완료 (steps={len(total_errors)}, cuts={len(cut_boundaries)}, score={score_path}, features={feature_path}, boundaries={boundaries_path})"
         )
 
     print("✅ 모든 조건 처리 완료")

@@ -278,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
     anomaly_parser.add_argument("--num-layers", type=int, default=2)
     anomaly_parser.add_argument("--dropout", type=float, default=0.1)
     anomaly_parser.add_argument("--learning-rate", type=float, default=1e-3)
-    anomaly_parser.add_argument("--epochs", type=int, default=10)
+    anomaly_parser.add_argument("--epochs", type=int, default=5)
     anomaly_parser.add_argument("--batch-size", type=int, default=64)
     anomaly_parser.add_argument(
         "--per-condition-limit",

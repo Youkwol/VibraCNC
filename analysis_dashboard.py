@@ -3,10 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from vibracnc.anomaly.autoencoder import load_model
+from vibracnc.anomaly.pipeline import score_with_artifacts
+from vibracnc.config import DatasetConfig
+from vibracnc.data.loader import discover_csv_files, load_csv
+from vibracnc.data.preprocessing import WindowingConfig, dataframe_to_windows
+from vibracnc.workflows import load_anomaly_artifacts
 
 # 페이지 설정
 st.set_page_config(
@@ -22,6 +29,202 @@ DEFAULT_DIAGNOSTICS_PATH = Path("artifacts/monitoring/diagnostics_report.json")
 DEFAULT_ANALYSIS_PATH = Path("artifacts/monitoring/analysis_report.json")
 DEFAULT_MODELS_DIR = Path("artifacts/models")
 DEFAULT_FIGURES_DIR = Path("artifacts/figures")
+DEFAULT_DATASET_DIR = Path("data/phm2010")
+
+
+@st.cache_data(show_spinner=False)
+def load_static_condition_data(
+    dataset_dir: str,
+    models_dir: str,
+    condition: str,
+    num_cuts: int,
+    sampling_rate: float,
+    window_seconds: float,
+    step_seconds: float,
+) -> tuple[list[dict], float]:
+    dataset_root = Path(dataset_dir)
+    models_path = Path(models_dir)
+    dataset_config = DatasetConfig(
+        root_dir=dataset_root,
+        sampling_rate=sampling_rate,
+        window_seconds=window_seconds,
+        step_seconds=step_seconds,
+    )
+    window_config = WindowingConfig.from_seconds(
+        window_seconds=window_seconds,
+        step_seconds=step_seconds,
+        sampling_rate=sampling_rate,
+    )
+
+    artifacts = load_anomaly_artifacts(models_path / "anomaly_artifacts.json")
+    model = load_model(models_path / "anomaly_autoencoder.pt", artifacts.config)
+
+    csv_files = discover_csv_files(dataset_root / condition)
+    if num_cuts is not None:
+        csv_files = csv_files[:num_cuts]
+
+    records: list[dict] = []
+    for idx, path in enumerate(csv_files, start=1):
+        frame = load_csv(path, column_names=dataset_config.resolve_column_names())
+        errors = score_with_artifacts(
+            model,
+            [frame],
+            dataset_config.fft_columns,
+            window_config,
+            artifacts,
+        )
+        score = float(np.mean(errors))
+        vibration_values = frame[list(dataset_config.fft_columns)].to_numpy(dtype=float)
+        vibration_rms = float(np.sqrt(np.mean(np.square(vibration_values))))
+
+        records.append(
+            {
+                "cut": idx,
+                "file": path.name,
+                "score": score,
+                "is_anomaly": bool(score > artifacts.threshold),
+                "vibration_rms": vibration_rms,
+            }
+        )
+
+    return records, float(artifacts.threshold)
+
+
+@st.cache_data(show_spinner=False)
+def compute_fft_spectrum(
+    dataset_dir: str,
+    condition: str,
+    cut_index: int,
+    sampling_rate: float,
+    window_seconds: float,
+    step_seconds: float,
+    fft_columns: tuple[str, ...],
+) -> tuple[list[float], list[float], str] | None:
+    dataset_root = Path(dataset_dir)
+    dataset_config = DatasetConfig(
+        root_dir=dataset_root,
+        sampling_rate=sampling_rate,
+        window_seconds=window_seconds,
+        step_seconds=step_seconds,
+    )
+    window_config = WindowingConfig.from_seconds(
+        window_seconds=window_seconds,
+        step_seconds=step_seconds,
+        sampling_rate=sampling_rate,
+    )
+    files = discover_csv_files(dataset_root / condition)
+    if cut_index < 1 or cut_index > len(files):
+        return None
+
+    path = files[cut_index - 1]
+    frame = load_csv(path, column_names=dataset_config.resolve_column_names())
+    frequencies, amplitudes = dataframe_to_windows(frame, fft_columns, window_config)
+    spectrum = amplitudes.mean(axis=(0, 2))
+    return frequencies.tolist(), spectrum.tolist(), path.name
+
+
+def render_static_condition_section(
+    records: list[dict],
+    threshold: float,
+    condition: str,
+    fft_payload: tuple[list[float], list[float], str] | None,
+    selected_cut: int,
+    freq_band: tuple[int, int],
+):
+    st.header("📌 Cut 기반 정적 분석")
+
+    if not records:
+        st.info("선택한 조건에서 사용할 수 있는 컷 데이터가 없습니다.")
+        return
+
+    df = pd.DataFrame(records)
+    selected_cut = min(max(selected_cut, 1), len(df))
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("총 Cut 수", len(df))
+    with col2:
+        st.metric("이상 탐지 수", int(df["is_anomaly"].sum()))
+    with col3:
+        ratio = df["is_anomaly"].mean() * 100 if len(df) > 0 else 0.0
+        st.metric("이상 비율", f"{ratio:.1f}%")
+    with col4:
+        st.metric("임계값", f"{threshold:.4f}")
+
+    st.subheader("1) 위험 점수 추이")
+    fig_risk = go.Figure()
+    fig_risk.add_trace(
+        go.Scatter(
+            x=df["cut"],
+            y=df["score"],
+            mode="lines+markers",
+            name="위험 점수",
+            line=dict(color="#1f77b4"),
+        )
+    )
+    anomaly_df = df[df["is_anomaly"]]
+    if not anomaly_df.empty:
+        fig_risk.add_trace(
+            go.Scatter(
+                x=anomaly_df["cut"],
+                y=anomaly_df["score"],
+                mode="markers",
+                name="이상 Cut",
+                marker=dict(color="#d62728", size=8),
+            )
+        )
+    fig_risk.add_hline(
+        y=threshold,
+        line_dash="dash",
+        line_color="orange",
+        annotation_text=f"Threshold {threshold:.4f}",
+    )
+    fig_risk.update_layout(
+        xaxis_title="Cut 번호",
+        yaxis_title="위험 점수",
+        height=350,
+    )
+    st.plotly_chart(fig_risk, use_container_width=True)
+
+    st.subheader("2) 평균 진동 세기 (RMS)")
+    fig_rms = px.line(
+        df,
+        x="cut",
+        y="vibration_rms",
+        markers=True,
+        labels={"cut": "Cut 번호", "vibration_rms": "진동 RMS"},
+        title="평균 진동 세기 추이",
+    )
+    fig_rms.update_layout(height=300)
+    st.plotly_chart(fig_rms, use_container_width=True)
+
+    st.subheader("3) 고장 원인 주파수 분석")
+    if fft_payload is None:
+        st.info("선택한 Cut에 대한 FFT 데이터를 가져올 수 없습니다.")
+        return
+
+    frequencies, spectrum, file_name = fft_payload
+    freq_min, freq_max = freq_band
+    highlight = [
+        freq_min <= freq <= freq_max for freq in frequencies
+    ]
+    colors = ["#ef553b" if flag else "#636efa" for flag in highlight]
+
+    fig_fft = go.Figure(
+        go.Bar(
+            x=frequencies,
+            y=spectrum,
+            marker_color=colors,
+            name="Amplitude",
+        )
+    )
+    fig_fft.update_layout(
+        title=f"FFT 스펙트럼 - Cut {selected_cut} ({file_name})",
+        xaxis_title="Frequency (Hz)",
+        yaxis_title="Amplitude",
+        height=400,
+    )
+    st.plotly_chart(fig_fft, use_container_width=True)
 
 
 def load_json(path: Path) -> dict | None:
@@ -429,7 +632,75 @@ def main():
                 value=str(DEFAULT_FIGURES_DIR),
             )
         )
+        st.subheader("정적 분석 설정")
+        dataset_dir = Path(
+            st.text_input(
+                "데이터셋 경로",
+                value=str(DEFAULT_DATASET_DIR),
+            )
+        )
+        static_condition = st.selectbox(
+            "분석 조건",
+            options=["c1", "c2", "c3", "c4", "c5", "c6"],
+            index=1,
+        )
+        num_cuts = st.slider("분석할 Cut 수", min_value=10, max_value=200, value=60, step=5)
+        sampling_rate = st.number_input("샘플링 레이트 (Hz)", value=25600.0, step=100.0)
+        window_seconds = st.number_input("윈도우 길이 (초)", value=0.1, step=0.01, format="%.3f")
+        step_seconds = st.number_input("윈도우 스텝 (초)", value=0.05, step=0.01, format="%.3f")
+        selected_cut = st.number_input(
+            "FFT 분석 Cut 번호",
+            min_value=1,
+            max_value=num_cuts,
+            value=num_cuts,
+            step=1,
+        )
+        freq_band = st.slider(
+            "강조할 주파수 대역 (Hz)",
+            min_value=0,
+            max_value=5000,
+            value=(100, 300),
+            step=50,
+        )
     
+    # 정적 분석 데이터 준비
+    try:
+        static_records, static_threshold = load_static_condition_data(
+            str(dataset_dir),
+            str(models_dir),
+            static_condition,
+            num_cuts,
+            sampling_rate,
+            window_seconds,
+            step_seconds,
+        )
+    except FileNotFoundError as exc:
+        st.error(f"정적 분석 데이터를 불러올 수 없습니다: {exc}")
+        static_records, static_threshold = [], 0.0
+
+    fft_payload = None
+    if static_records:
+        fft_payload = compute_fft_spectrum(
+            str(dataset_dir),
+            static_condition,
+            int(selected_cut),
+            sampling_rate,
+            window_seconds,
+            step_seconds,
+            ("vx", "vy", "vz"),
+        )
+
+    render_static_condition_section(
+        records=static_records,
+        threshold=static_threshold,
+        condition=static_condition,
+        fft_payload=fft_payload,
+        selected_cut=int(selected_cut),
+        freq_band=freq_band,
+    )
+
+    st.divider()
+
     # 데이터 로드
     monitoring_data = load_json(monitoring_path)
     diagnostics_data = load_json(diagnostics_path)
