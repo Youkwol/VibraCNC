@@ -72,7 +72,11 @@ class CNCViewerApp:
         self.cut_boundaries: list[int] = []  # 각 cut 파일의 시작 step 인덱스
 
         self.threshold = tk.DoubleVar(value=THRESHOLD_DEFAULT)
-        self.speed = int(REAL_TIME_STEP_MS)  # 실제 데이터 속도로 기본값 설정 (약 3.9ms)
+        # GUI 업데이트 최적화: 실제 step 간격 설정
+        # GUI 오버헤드를 고려하여 실제 속도로 설정
+        self.speed = max(1, int(REAL_TIME_STEP_MS))  # 약 3.9ms
+        # GUI 업데이트 빈도 조절: 매 N step마다 한 번만 업데이트 (성능 향상)
+        self.update_interval = 5  # 5 step마다 한 번만 GUI 업데이트
         self.status_var = tk.StringVar(value="준비 완료")
 
         # 비용 변수 (Tab 4용)
@@ -104,9 +108,12 @@ class CNCViewerApp:
 
         ttk.Label(control_frame, text=" |  재생 속도:").pack(side="left", padx=10)
         # 실제 데이터 속도(약 3.9ms)를 기준으로 스케일 범위 설정
-        # 0.5배속 ~ 10배속 범위: 3.9*2=7.8ms ~ 3.9/10=0.39ms
-        self.scale_speed = ttk.Scale(control_frame, from_=int(REAL_TIME_STEP_MS * 2), to=int(REAL_TIME_STEP_MS / 10), command=self.update_speed)
-        self.scale_speed.set(int(REAL_TIME_STEP_MS))  # 실제 속도로 기본값 설정
+        # Tkinter Scale은 from_ < to 이어야 하므로, 빠른 속도(작은 값) ~ 느린 속도(큰 값) 순서
+        # update_interval을 고려하여 실제 속도 범위 설정
+        min_speed = max(1, int(REAL_TIME_STEP_MS / 10))  # 10배속
+        max_speed = int(REAL_TIME_STEP_MS * 2)  # 0.5배속
+        self.scale_speed = ttk.Scale(control_frame, from_=min_speed, to=max_speed, command=self.update_speed)
+        self.scale_speed.set(self.speed)  # 기본값 사용
         self.scale_speed.pack(side="left", padx=5)
         
         # 실제 속도 버튼 추가
@@ -293,9 +300,9 @@ class CNCViewerApp:
     
     def set_real_time_speed(self) -> None:
         """실제 데이터 샘플링 속도로 설정"""
-        self.speed = int(REAL_TIME_STEP_MS)
-        self.scale_speed.set(int(REAL_TIME_STEP_MS))
-        self.status_var.set(f"재생 속도: 실제 속도 ({REAL_TIME_STEP_MS:.2f}ms/step)")
+        self.speed = max(1, int(REAL_TIME_STEP_MS))
+        self.scale_speed.set(self.speed)
+        self.status_var.set(f"재생 속도: 실제 속도 ({REAL_TIME_STEP_MS:.2f}ms/step, {self.update_interval} step마다 GUI 업데이트)")
 
     # [추가] 기준값 계산 함수
     def calc_baseline(self) -> None:
@@ -410,9 +417,15 @@ class CNCViewerApp:
     def run_loop(self) -> None:
         if self.is_running and self.error_scores is not None:
             if self.current_step < len(self.error_scores):
-                self.update_gui_once()
+                # GUI 업데이트 최적화: 매 update_interval step마다 한 번만 업데이트
+                if self.current_step % self.update_interval == 0:
+                    self.update_gui_once()
+                else:
+                    # GUI 업데이트 없이 step만 진행 (데이터는 계속 진행)
+                    pass
                 self.current_step += 1
-                self.root.after(self.speed, self.run_loop)
+                # step 간격을 update_interval로 나눠서 실제 속도 유지
+                self.root.after(self.speed * self.update_interval, self.run_loop)
             else:
                 self.is_running = False
                 self.status_var.set("시뮬레이션 종료")
