@@ -1,0 +1,27 @@
+{
+  "feature_importance": [
+    {
+      "feature": "vz_rms",
+      "importance": 0.3440055917153449
+    },
+    {
+      "feature": "vz_std",
+      "importance": 0.3111387760467112
+    },
+    {
+      "feature": "sy_rms",
+      "importance": 0.1015182202064769
+    },
+    {
+      "feature": "sy_std",
+      "importance": 0.0611902838020847
+    },
+    {
+      "feature": "sx_max",
+      "importance": 0.0331706976849129
+    }
+  ],
+  "correlation_matrix": [],
+  "comparison_table": [],
+  "important_freq_band": null
+}

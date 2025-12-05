@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,8 @@ THRESHOLD_DEFAULT = 0.0674
 SAMPLING_RATE_HZ = 25600.0
 # 실제 step 간격 계산: (STRIDE / (SAMPLING_RATE_HZ / DOWNSAMPLE_FACTOR)) * 1000 (밀리초)
 REAL_TIME_STEP_MS = (STRIDE / (SAMPLING_RATE_HZ / DOWNSAMPLE_FACTOR)) * 1000  # 약 3.906 밀리초
+# 1cut당 실제 소요 시간 (초)
+CUT_DURATION_SECONDS = 8.5
 # 실제 데이터 순서: [vx, vy, vz, sx, sy, sz, temp]
 SENSOR_NAMES = ["Vib X", "Vib Y", "Vib Z", "Force X", "Force Y", "Force Z", "Temp"]
 SENSOR_DESCRIPTIONS = {
@@ -72,9 +75,10 @@ class CNCViewerApp:
         self.cut_boundaries: list[int] = []  # 각 cut 파일의 시작 step 인덱스
 
         self.threshold = tk.DoubleVar(value=THRESHOLD_DEFAULT)
-        # GUI 업데이트 최적화: 실제 step 간격 설정
-        # GUI 오버헤드를 고려하여 실제 속도로 설정
-        self.speed = max(1, int(REAL_TIME_STEP_MS))  # 약 3.9ms
+        # 실제 시간 기반 시뮬레이션을 위한 변수
+        self.sim_start_time: float | None = None  # 시뮬레이션 시작 시간 (초)
+        self.sim_start_step = 0  # 시뮬레이션 시작 시 step
+        self.speed_multiplier = 1.0  # 속도 배율 (1.0 = 실제 속도)
         # GUI 업데이트 빈도 조절: 매 N step마다 한 번만 업데이트 (성능 향상)
         self.update_interval = 5  # 5 step마다 한 번만 GUI 업데이트
         self.status_var = tk.StringVar(value="준비 완료")
@@ -106,15 +110,19 @@ class CNCViewerApp:
         ttk.Button(control_frame, text="⏸ 일시정지", command=self.pause_sim).pack(side="left")
         ttk.Button(control_frame, text="⏹ 초기화", command=self.reset_sim).pack(side="left", padx=5)
 
+        ttk.Label(control_frame, text=" |  컷 번호 이동:").pack(side="left", padx=10)
+        self.entry_cut_jump = ttk.Entry(control_frame, width=8)
+        self.entry_cut_jump.pack(side="left", padx=5)
+        self.entry_cut_jump.bind("<Return>", lambda e: self.jump_to_cut())
+        ttk.Button(control_frame, text="이동", command=self.jump_to_cut).pack(side="left", padx=2)
+
         ttk.Label(control_frame, text=" |  재생 속도:").pack(side="left", padx=10)
-        # 실제 데이터 속도(약 3.9ms)를 기준으로 스케일 범위 설정
-        # Tkinter Scale은 from_ < to 이어야 하므로, 빠른 속도(작은 값) ~ 느린 속도(큰 값) 순서
-        # update_interval을 고려하여 실제 속도 범위 설정
-        min_speed = max(1, int(REAL_TIME_STEP_MS / 10))  # 10배속
-        max_speed = int(REAL_TIME_STEP_MS * 2)  # 0.5배속
-        self.scale_speed = ttk.Scale(control_frame, from_=min_speed, to=max_speed, command=self.update_speed)
-        self.scale_speed.set(self.speed)  # 기본값 사용
+        # 속도 배율 설정 (0.1배 ~ 10배)
+        self.scale_speed = ttk.Scale(control_frame, from_=0.1, to=10.0, command=self.update_speed)
+        self.scale_speed.set(1.0)  # 기본값: 실제 속도
         self.scale_speed.pack(side="left", padx=5)
+        self.lbl_speed = ttk.Label(control_frame, text="1.0x")
+        self.lbl_speed.pack(side="left", padx=5)
         
         # 실제 속도 버튼 추가
         ttk.Button(control_frame, text="실제 속도", command=self.set_real_time_speed).pack(side="left", padx=5)
@@ -152,6 +160,7 @@ class CNCViewerApp:
         self.lbl_cut = self.create_kpi_box(kpi_frame, "현재 작업 (Cut)", 0)
         self.lbl_score = self.create_kpi_box(kpi_frame, "현재 위험 점수", 1)
         self.lbl_status = self.create_kpi_box(kpi_frame, "장비 상태", 2, is_status=True)
+        self.lbl_elapsed_time = self.create_kpi_box(kpi_frame, "경과 시간", 3)
 
         # 그래프 영역
         plot_frame = ttk.Frame(self.tab1)
@@ -206,7 +215,7 @@ class CNCViewerApp:
         self.ax2 = self.fig2.add_subplot(111)
         self.ax2.set_title("Wear Degradation Trend")
         self.ax2.set_ylabel("Wear (mm)")
-        self.ax2.set_xlabel("Time Step")
+        self.ax2.set_xlabel("Time (cut)")
         self.ax2.grid(True, alpha=0.3)
 
         # 선 그리기
@@ -223,6 +232,26 @@ class CNCViewerApp:
     def setup_tab3(self) -> None:
         content = ttk.Frame(self.tab3, padding=10)
         content.pack(fill="both", expand=True)
+
+        # --- [추가됨] 최상단 진단 리포트 영역 ---
+        report_frame = ttk.LabelFrame(content, text="🤖 AI 고장 원인 진단 리포트", padding=15)
+        report_frame.pack(fill="x", side="top", pady=(0, 10))
+        
+        self.lbl_diagnosis_title = ttk.Label(
+            report_frame, 
+            text="상태 양호", 
+            font=("Helvetica", 16, "bold"), 
+            foreground="green"
+        )
+        self.lbl_diagnosis_title.pack(anchor="w")
+        
+        self.lbl_diagnosis_desc = ttk.Label(
+            report_frame, 
+            text="특이 사항이 발견되지 않았습니다.", 
+            font=("Helvetica", 12)
+        )
+        self.lbl_diagnosis_desc.pack(anchor="w", pady=(5, 0))
+        # -------------------------------------
 
         # 상단: 바 차트 (센서 중요도)
         top_frame = ttk.Frame(content)
@@ -296,13 +325,28 @@ class CNCViewerApp:
         return lbl
 
     def update_speed(self, val: str) -> None:
-        self.speed = int(float(val))
+        """속도 배율 업데이트"""
+        self.speed_multiplier = float(val)
+        # lbl_speed가 생성되었는지 확인 (UI 초기화 중일 수 있음)
+        if hasattr(self, "lbl_speed"):
+            self.lbl_speed.config(text=f"{self.speed_multiplier:.1f}x")
+        # 시뮬레이션이 실행 중이면 시간 기준 재동기화
+        if self.is_running and self.sim_start_time is not None:
+            self.sim_start_time = time.perf_counter()
+            self.sim_start_step = self.current_step
     
     def set_real_time_speed(self) -> None:
-        """실제 데이터 샘플링 속도로 설정"""
-        self.speed = max(1, int(REAL_TIME_STEP_MS))
-        self.scale_speed.set(self.speed)
-        self.status_var.set(f"재생 속도: 실제 속도 ({REAL_TIME_STEP_MS:.2f}ms/step, {self.update_interval} step마다 GUI 업데이트)")
+        """실제 데이터 샘플링 속도로 설정 (1cut당 8.5초 기준)"""
+        self.speed_multiplier = 1.0
+        self.scale_speed.set(1.0)
+        # lbl_speed가 생성되었는지 확인 (UI 초기화 중일 수 있음)
+        if hasattr(self, "lbl_speed"):
+            self.lbl_speed.config(text="1.0x")
+        # 시뮬레이션이 실행 중이면 시간 기준 재동기화
+        if self.is_running and self.sim_start_time is not None:
+            self.sim_start_time = time.perf_counter()
+            self.sim_start_step = self.current_step
+        self.status_var.set(f"재생 속도: 실제 속도 (1cut당 {CUT_DURATION_SECONDS}초, {self.update_interval} step마다 GUI 업데이트)")
 
     # [추가] 기준값 계산 함수
     def calc_baseline(self) -> None:
@@ -402,32 +446,97 @@ class CNCViewerApp:
     def start_sim(self) -> None:
         if not self.is_running and self.error_scores is not None:
             self.is_running = True
+            # 시뮬레이션 시작 시간 기록
+            self.sim_start_time = time.perf_counter()
+            self.sim_start_step = self.current_step
             self.run_loop()
 
     def pause_sim(self) -> None:
         self.is_running = False
+        self.sim_start_time = None
         self.status_var.set("일시정지")
 
     def reset_sim(self) -> None:
         self.is_running = False
         self.current_step = 0
+        self.sim_start_time = None
+        self.sim_start_step = 0
         self.update_gui_once()
         self.status_var.set("초기화됨")
+
+    def jump_to_cut(self) -> None:
+        """입력된 컷 번호로 이동"""
+        if self.error_scores is None or len(self.error_scores) == 0:
+            messagebox.showwarning("경고", "데이터가 로드되지 않았습니다.")
+            return
+        
+        try:
+            cut_num = int(self.entry_cut_jump.get())
+            if cut_num < 1:
+                messagebox.showwarning("경고", "컷 번호는 1 이상이어야 합니다.")
+                return
+            
+            # 컷 번호를 step 인덱스로 변환
+            target_step = self._cut_to_step(cut_num)
+            
+            if target_step is None:
+                messagebox.showerror("오류", f"컷 번호 {cut_num}을 찾을 수 없습니다.")
+                return
+            
+            if target_step >= len(self.error_scores):
+                messagebox.showwarning("경고", f"컷 번호 {cut_num}이 데이터 범위를 벗어났습니다.")
+                return
+            
+            # step 이동
+            self.is_running = False
+            self.current_step = target_step
+            self.sim_start_time = None
+            self.sim_start_step = 0
+            self.update_gui_once()
+            self.status_var.set(f"컷 #{cut_num}로 이동 완료 (Step {target_step})")
+            
+        except ValueError:
+            messagebox.showerror("오류", "올바른 숫자를 입력하세요.")
+        except Exception as e:
+            messagebox.showerror("오류", f"이동 중 오류 발생: {e}")
+
+    def _cut_to_step(self, cut_num: int) -> int | None:
+        """컷 번호를 step 인덱스로 변환"""
+        if self.cut_boundaries and len(self.cut_boundaries) > 0:
+            # cut_boundaries[i]는 i+1번째 cut의 시작 step 인덱스
+            if cut_num < 1 or cut_num > len(self.cut_boundaries):
+                return None
+            # cut_num번째 cut의 시작 step 인덱스
+            return self.cut_boundaries[cut_num - 1]
+        else:
+            # 경계 정보가 없으면 대략적인 계산
+            # 대략적인 계산: (cut_num - 1) * SEQ_LEN / (STRIDE * DOWNSAMPLE_FACTOR)
+            approx_step = int((cut_num - 1) * SEQ_LEN / (STRIDE * DOWNSAMPLE_FACTOR))
+            return approx_step if approx_step < len(self.error_scores) else None
 
     def run_loop(self) -> None:
         if self.is_running and self.error_scores is not None:
             if self.current_step < len(self.error_scores):
+                # 실제 시간 기반 step 진행
+                if self.sim_start_time is not None:
+                    # 실제 경과 시간 계산
+                    elapsed_real_time = (time.perf_counter() - self.sim_start_time) * self.speed_multiplier
+                    # 경과 시간에 해당하는 step 계산
+                    target_step = self.sim_start_step + int(elapsed_real_time * 1000 / REAL_TIME_STEP_MS)
+                    # target_step까지 진행 (한 번에 여러 step 진행 가능)
+                    if target_step > self.current_step:
+                        self.current_step = min(target_step, len(self.error_scores) - 1)
+                
                 # GUI 업데이트 최적화: 매 update_interval step마다 한 번만 업데이트
                 if self.current_step % self.update_interval == 0:
                     self.update_gui_once()
-                else:
-                    # GUI 업데이트 없이 step만 진행 (데이터는 계속 진행)
-                    pass
-                self.current_step += 1
-                # step 간격을 update_interval로 나눠서 실제 속도 유지
-                self.root.after(self.speed * self.update_interval, self.run_loop)
+                
+                # 다음 루프 스케줄링 (최소 1ms 간격)
+                # 실제 시간 기반이므로 짧은 간격으로 체크
+                self.root.after(1, self.run_loop)
             else:
                 self.is_running = False
+                self.sim_start_time = None
                 self.status_var.set("시뮬레이션 종료")
 
     def update_gui_once(self) -> None:
@@ -476,17 +585,47 @@ class CNCViewerApp:
             # 경계 정보가 있으면 현재 step 인덱스가 어느 cut에 속하는지 찾기
             # cut_boundaries[i]는 i+1번째 cut의 시작 step 인덱스
             cut_num = len(self.cut_boundaries)  # 기본값: 마지막 cut
+            cut_start_idx = 0  # 현재 cut의 시작 step 인덱스
             for i in range(len(self.cut_boundaries) - 1, -1, -1):  # 역순으로 검색
                 if idx >= self.cut_boundaries[i]:
                     cut_num = i + 1
+                    cut_start_idx = self.cut_boundaries[i]
                     break
         else:
             # 경계 정보가 없으면 기존 방식 사용 (하위 호환성)
             approx_cut = int((idx * STRIDE * DOWNSAMPLE_FACTOR) / SEQ_LEN) + 1
             cut_num = approx_cut
+            # 대략적인 cut 시작 인덱스 계산
+            cut_start_idx = int((cut_num - 1) * SEQ_LEN / (STRIDE * DOWNSAMPLE_FACTOR))
+        
+        # 실제 경과 시간 계산 (실제 시간 기반)
+        if self.sim_start_time is not None and self.is_running:
+            # 실제 경과 시간 사용 (정확함) - Tkinter의 부정확성을 보완
+            elapsed_real_time = (time.perf_counter() - self.sim_start_time) * self.speed_multiplier
+            total_elapsed_seconds = elapsed_real_time
+        else:
+            # 시뮬레이션이 실행 중이 아니면 step 기반 계산
+            steps_in_current_cut = idx - cut_start_idx
+            time_in_current_cut = (steps_in_current_cut * REAL_TIME_STEP_MS) / 1000.0
+            completed_cuts = cut_num - 1
+            total_elapsed_seconds = (completed_cuts * CUT_DURATION_SECONDS) + time_in_current_cut
+        
+        # 시간 포맷팅 (시:분:초 또는 분:초)
+        if total_elapsed_seconds >= 3600:
+            hours = int(total_elapsed_seconds // 3600)
+            minutes = int((total_elapsed_seconds % 3600) // 60)
+            seconds = total_elapsed_seconds % 60
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:05.2f}"
+        elif total_elapsed_seconds >= 60:
+            minutes = int(total_elapsed_seconds // 60)
+            seconds = total_elapsed_seconds % 60
+            time_str = f"{minutes:02d}:{seconds:05.2f}"
+        else:
+            time_str = f"{total_elapsed_seconds:.2f}초"
         
         self.lbl_cut.config(text=f"#{cut_num}")
         self.lbl_score.config(text=f"{score:.4f}")
+        self.lbl_elapsed_time.config(text=time_str)
 
         is_danger = score > thresh
         if is_danger:
@@ -584,6 +723,44 @@ class CNCViewerApp:
             
             # 테이블에 삽입 (소수점 4자리까지 예쁘게)
             self.tree.insert("", "end", values=(name, f"{norm_val:.4f}", f"{curr_val:.4f}", status))
+
+        # --- [추가됨] 원인 진단 로직 ---
+        # 1. 현재 가장 문제가 되는 센서 찾기 (가장 기여도가 큰 센서)
+        max_idx = np.argmax(features)
+        max_val = features[max_idx]
+        max_sensor = SENSOR_NAMES[max_idx]
+        
+        # 2. 해당 센서의 정상 기준값
+        baseline_val = self.normal_baseline[max_idx]
+        
+        # 3. 진단 메시지 생성
+        if max_val > baseline_val * 3:  # 기준치 3배 초과 시 위험으로 간주
+            diag_title = f"⚠️ 주원인 감지: {max_sensor} 이상"
+            diag_color = "red"
+            
+            # 센서별 진단 메시지
+            if "Vib X" in max_sensor or "Vib Y" in max_sensor:
+                desc = "공구의 불규칙한 떨림(Chatter)이 심합니다. 회전축 정렬(Run-out)이나 고정 상태를 점검하세요."
+            elif "Vib Z" in max_sensor:
+                desc = "공구가 바닥을 콩콩 찍고 있습니다. 기계의 수직 축 정렬 불량이나 고정 장치 문제입니다."
+            elif "Force X" in max_sensor or "Force Y" in max_sensor:
+                desc = "측면 절삭 저항이 과도합니다. 이송 속도를 낮추거나 공구 마모 상태를 확인하세요."
+            elif "Force Z" in max_sensor:
+                desc = "수직 압력이 비정상적으로 높습니다. 칩(Chip) 배출 불량이나 날 끝 파손이 의심됩니다."
+            elif "Temp" in max_sensor:
+                desc = "온도가 비정상적으로 상승했습니다. 윤활유 부족, 과열, 또는 미세 크랙 발생 가능성이 있습니다."
+            else:
+                desc = "복합적인 이상 징후가 감지되었습니다. 전체 시스템 점검이 필요합니다."
+        else:
+            diag_title = "✅ 상태 양호 (Stable)"
+            diag_color = "green"
+            desc = "모든 센서 데이터가 정상 범위 내에서 작동 중입니다."
+
+        # UI 업데이트 (lbl_diagnosis_title과 lbl_diagnosis_desc가 존재하는지 확인)
+        if hasattr(self, "lbl_diagnosis_title") and hasattr(self, "lbl_diagnosis_desc"):
+            self.lbl_diagnosis_title.config(text=diag_title, foreground=diag_color)
+            self.lbl_diagnosis_desc.config(text=desc)
+        # -----------------------------
 
         # 4. Tab 4 업데이트 (최적화)
         # 절감 비용 계산: (고장비용 - 교체비용) * (진행률) -> 단순히 시뮬레이션용 수식
